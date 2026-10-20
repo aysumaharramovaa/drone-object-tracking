@@ -1,0 +1,7 @@
+tracker_type: bytetrack
+track_high_thresh: 0.20   # birinci uyğunlaşdırma üçün əminlik həddi (standart 0.25)
+track_low_thresh: 0.05    # ikinci uyğunlaşdırma üçün aşağı hədd (standart 0.1)
+new_track_thresh: 0.20    # yeni ID yaratmaq üçün minimum əminlik (standart 0.25)
+track_buffer: 60          # itmiş izin neçə kadr yaddaşda qalması (standart 30)
+match_thresh: 0.8         # izlə aşkarlamanın uyğunlaşma həddi
+fuse_score: True

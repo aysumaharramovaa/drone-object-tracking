@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 import statistics
 import time
 from collections import Counter, defaultdict, deque
@@ -9,8 +10,9 @@ import numpy as np
 from ultralytics import YOLO
 
 
-def summarize_tracks(tracks, total_frames, total_detections, short_limit=10):
 
+def summarize_tracks(tracks, total_frames, total_detections, short_limit=10):
+ 
     lengths = [t["n"] for t in tracks.values()]
     if not lengths:
         return {"unique_ids": 0, "mean_len": 0.0, "median_len": 0.0,
@@ -30,6 +32,35 @@ def color_for_id(track_id):
     return tuple(int(c) for c in rng.randint(60, 255, 3))
 
 
+def trail_alpha(age, ttl):
+ 
+    if age > ttl:
+        return 0.0
+    return 1.0 - 0.65 * (age / max(ttl, 1))
+
+
+def draw_trails(frame, trails, trail_seen, frame_idx, ttl):
+ 
+    for tid, pts_q in trails.items():
+        age = frame_idx - trail_seen.get(tid, -10**9)
+        a = trail_alpha(age, ttl)
+        if a <= 0 or not pts_q:
+            continue
+        color = tuple(int(c * a) for c in color_for_id(tid))
+        pts = np.array(pts_q, dtype=np.int32).reshape(-1, 1, 2)
+        if len(pts) > 1:
+            cv2.polylines(frame, [pts], False, color, 2 if age == 0 else 1)
+        last = (int(pts[-1, 0, 0]), int(pts[-1, 0, 1]))
+        cv2.circle(frame, last, 3 if age == 0 else 2, color, -1)   
+
+
+def prune_trails(trails, trail_seen, frame_idx, ttl):
+    stale = [t for t, seen in trail_seen.items() if frame_idx - seen > ttl]
+    for t in stale:
+        trails.pop(t, None)
+        trail_seen.pop(t, None)
+
+
 def draw_info_panel(frame, lines):
     line_h, x0, y0 = 22, 8, 8
     w, h = 270, 12 + line_h * len(lines)
@@ -44,7 +75,7 @@ def draw_info_panel(frame, lines):
 def build_panel_lines(tracker, frame_idx, active, unique_ids, frame_counts, max_rows=10):
 
     lines = [
-        f"tracker: {tracker.replace('.yaml', '')}",
+        f"tracker: {os.path.basename(tracker).replace('.yaml', '')}",
         f"frame: {frame_idx}",
         f"active tracks: {active}",
         f"unique IDs so far: {unique_ids}",
@@ -63,15 +94,25 @@ def parse_args():
     p.add_argument("--source", required=True, help="Video faylının yolu")
     p.add_argument("--model", default="yolov8s.pt",
                    help="YOLO modeli. Kiçik obyektlər üçün s/m, sürət üçün n")
-    p.add_argument("--tracker", default="bytetrack.yaml",
-                   help="bytetrack.yaml və ya botsort.yaml")
+
+    local_tracker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bytetrack_drone.yaml")
+    p.add_argument("--tracker", default=local_tracker if os.path.exists(local_tracker) else "bytetrack.yaml",
+                   help="bytetrack_drone.yaml, bytetrack.yaml və ya botsort.yaml")
     p.add_argument("--classes", type=int, nargs="+", default=None,
                    help="Yalnız bu sinif nömrələrini izlə. Verilməsə, modelin BÜTÜN sinifləri izlənir. "
                         "DİQQƏT: COCO modeli (yolov8s.pt) üçün 0=person, 2=car, 3=motorcycle, 5=bus, 7=truck; "
                         "VisDrone ilə öyrədilmiş modeldə nömrələr fərqlidir (0=pedestrian, 1=people, "
                         "2=bicycle, 3=car, 4=van, 5=truck, 6=tricycle, 7=awning-tricycle, 8=bus, 9=motor)")
-    p.add_argument("--conf", type=float, default=0.25,
-                   help="Əminlik həddi. Dronda obyektlər kiçikdir, ona görə aşağıdır")
+    p.add_argument("--conf", type=float, default=0.10,
+                   help="Əminlik həddi. Aşağı olması daha çox obyekt tutur (həm də daha çox yalançı aşkarlama). "
+                        "Çox yalançı qutu görsən 0.15-0.25 et")
+    p.add_argument("--max-det", type=int, default=500,
+                   help="Bir kadrda maksimum aşkarlama sayı (sıx dron kadrlarında standart 300 azdır)")
+    p.add_argument("--trail-len", type=int, default=40,
+                   help="İzdə saxlanan maksimum nöqtə sayı (kadr)")
+    p.add_argument("--trail-ttl", type=int, default=45,
+                   help="Obyekt aşkarlanmayandan sonra izi neçə kadr görünsün. "
+                        "Bu müddətdən sonra iz tam yox olur")
     p.add_argument("--imgsz", type=int, default=1280,
                    help="Modelə verilən şəkil ölçüsü. Böyük olması kiçik obyektləri tutmağa kömək edir")
     p.add_argument("--max-frames", type=int, default=0,
@@ -106,10 +147,9 @@ def main():
         writer = cv2.VideoWriter(args.save, cv2.VideoWriter_fourcc(*"mp4v"),
                                  src_fps, (width, height))
 
-
     tracks = defaultdict(lambda: {"first": None, "last": None, "n": 0, "cls": Counter()})
-    trails = defaultdict(lambda: deque(maxlen=40))
-
+    trails = defaultdict(lambda: deque(maxlen=args.trail_len))
+    trail_seen = {} 
     frame_idx = 0
     total_detections = 0
     t_start = time.time()
@@ -129,6 +169,7 @@ def main():
             classes=args.classes,
             conf=args.conf,
             imgsz=args.imgsz,
+            max_det=args.max_det,
             verbose=False,
         )[0]
 
@@ -158,13 +199,14 @@ def main():
                 color = color_for_id(tid)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 trails[tid].append((cx, cy))
+                trail_seen[tid] = frame_idx
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
                 label = f"{name} {tid}" if args.labels else str(tid)
                 cv2.putText(frame, label, (x1, max(y1 - 3, 10)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
-                pts = np.array(trails[tid], dtype=np.int32).reshape(-1, 1, 2)
-                if len(pts) > 1:
-                    cv2.polylines(frame, [pts], False, color, 1)
+
+        draw_trails(frame, trails, trail_seen, frame_idx, args.trail_ttl)
+        prune_trails(trails, trail_seen, frame_idx, args.trail_ttl)
 
         draw_info_panel(frame, build_panel_lines(
             args.tracker, frame_idx, active, len(tracks), frame_counts))
