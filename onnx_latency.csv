@@ -1,0 +1,4 @@
+model,size_MB,threads,median_ms,p95_ms,FPS
+best.onnx,44.97,1,970.19,1050.55,1.03
+best.onnx,44.97,2,425.78,475.12,2.35
+best.onnx,44.97,4,225.62,257.22,4.43
