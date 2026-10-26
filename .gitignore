@@ -13,3 +13,7 @@ venv/
 
 .vscode/
 .DS_Store
+
+onnx_latency.csv
+camera_motion.csv
+tracks_*.csv
